@@ -48,7 +48,7 @@ Goal: Teach semantic distinction between roof and ground in informal settlements
 - **Method**: Full fine-tuning (Backbone + Head)
 - **Initialization**:
   - Backbone: ImageNet-22K pretrained weights
-  - Head: Random initialization ( Perhaps I can find some pretrained weight here as well ) 
+  - Head: Random initialization ( Perhaps I can find some pretrained weight here as well , perhaps COCO weights ? ) 
 - **Hyperparameters**: Fixed standard defaults ( Can't afford gpu to do so ) 
 - **Outcome**: Assuming a binary segmentation mask for building
 - 
