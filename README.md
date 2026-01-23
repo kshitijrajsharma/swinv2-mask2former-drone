@@ -13,7 +13,7 @@ The current U-Net architecture encounters three specific technical challenges in
 This experiment proposes a composable architecture combining modern feature extraction with instance-based prediction.
 
 ```mermaid
-graph LR
+graph TD
     A["Input: 30cm RGB Aerial Image (TorchGeo)"] --> B["Backbone: Swin Transformer V2"]
     B -->|"Features at 1/4, 1/8, 1/16, 1/32 scale"| C["Pixel Decoder: Multi-Scale Deformable Attention"]
     C --> D["Transformer Decoder: Mask2Former"]
@@ -134,3 +134,5 @@ Stage 1 uses fixed hyperparameters. All tuning occurs during Stage 2 on the 200-
 
 3. Kervadec et al. (2019). Boundary Loss for Highly Unbalanced Segmentation. MIDL 2019.  
    [https://arxiv.org/abs/1812.07032](https://arxiv.org/abs/1812.07032)
+4. Download RAMP Data : [https://source.coop/ramp/ramp](https://source.coop/ramp/ramp)
+5. RAMP Docs : [https://rampml.global/training-data/](https://rampml.global/training-data/) 
