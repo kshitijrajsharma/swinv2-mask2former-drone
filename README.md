@@ -25,8 +25,6 @@ graph TD
     style D fill:#fff9c4,stroke:#fbc02d,stroke-width:2px
 ```
 
----
-
 ## Architecture Design
 
 ### Component Selection
@@ -37,7 +35,6 @@ graph TD
 | Head | Mask2Former | Uses 100 learnable queries to predict instance masks. Treats each building as a separate object, solving the blob problem. |
 | Adapter | LoRA (Rank = 16) | Applied during Stage 2 fine-tuning. Enables geographic adaptation without catastrophic forgetting. |
 
----
 
 ## Training Strategy: Two-Stage Curriculum
 
@@ -63,8 +60,6 @@ Goal: Adapt to local soil colors, lighting, and building styles. , I am targetin
 - Method: Frozen backbone + LoRA adapters + trainable head
 - Outcome: Site-specific model with strong generalization
 
----
-
 ## Loss Function
 
 To address irregular building shapes, we extend standard Mask2Former loss with boundary constraints.
@@ -82,7 +77,6 @@ $$
 - Focal Loss (L_Focal): Emphasizes hard-to-classify pixels
 - Hausdorff Boundary Loss (L_Boundary): Penalizes edge mismatch, enforcing sharp corners, I think this is important for our irregular geometry problem
 
----
 
 ## Implementation Details
 
@@ -99,7 +93,6 @@ $$
 |----------|----------|-------|
 | Code Implementation | ~x hours | collate_fn and model definition |
 
----
 
 ## Hyperparameter Tuning (Stage 2 Only)
 
@@ -121,8 +114,6 @@ Stage 1 uses fixed hyperparameters. All tuning occurs during Stage 2 on the 200-
 - Standard: 16 (best balance)
 - Low: 8 (if overfitting occurs)
 - High: 32 (if model fails to capture new roof textures)
-
----
 
 ## References
 
