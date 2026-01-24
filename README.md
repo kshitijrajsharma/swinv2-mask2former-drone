@@ -75,7 +75,7 @@ $$
 - Cross-Entropy (L_CE): Binary classification (building vs background)
 - Dice Loss (L_Dice): Optimizes spatial overlap
 - Focal Loss (L_Focal): Emphasizes hard-to-classify pixels
-- Hausdorff Boundary Loss (L_Boundary): Penalizes edge mismatch, enforcing sharp corners, I think this is important for our irregular geometry problem
+- Hausdorff Boundary Loss (L_Boundary): Penalizes edge mismatch, enforcing sharp corners, I think this is important for our irregular geometry problem , ref : `torchmetrics.segmentation.HausdorffDistance` 
 
 ## Implementation Details
 
