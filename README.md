@@ -95,7 +95,7 @@ $$
 
 ## Hyperparameter Tuning (Stage 2 Only)
 
-Stage 1 uses fixed hyperparameters. All tuning occurs during Stage 2 on the 200-chip validation set.
+Stage 1 uses fixed hyperparameters. All tuning occurs during Stage 2 using (optuna)[https://pypi.org/project/optuna/] on the 200-chip validation set.
 
 ### Learning Rate
 
