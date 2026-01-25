@@ -21,8 +21,8 @@ class Config:
     num_queries: int = 0
     pretrained_model: str = "facebook/mask2former-swin-base-coco-instance"
     
-    stage1_epochs: int = 20
-    stage1_batch_size: int = 2
+    stage1_epochs: int = 100
+    stage1_batch_size: int = 4
     stage1_lr: float = 1e-4
     stage1_weight_decay: float = 0.01
     stage1_max_batches_per_epoch: int = 50

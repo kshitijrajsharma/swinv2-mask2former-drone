@@ -87,7 +87,9 @@ def train_epoch(model, dataloader, criterion, optimizer, device, metrics, grad_a
                 gt_building = gt_masks_resized[building_mask]
                 metrics.update(pred_probs.flatten(), gt_building.flatten().int())
         
-        pbar.set_postfix({"loss": f"{loss.item() * grad_accum_steps:.4f}"})
+        lr = optimizer.param_groups[0]['lr']
+        mem = torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0
+        pbar.set_postfix({'loss': f'{loss.item() * grad_accum_steps:.4f}', 'lr': f'{lr:.2e}', 'mem': f'{mem:.1f}G'})
     
     epoch_metrics = metrics.compute()
     return total_loss / len(dataloader), epoch_metrics
@@ -101,7 +103,7 @@ def validate_epoch(model, dataloader, criterion, device, metrics):
     metrics.reset()
     
     pbar = tqdm(dataloader, desc="Validation")
-    for batch in pbar:
+    for idx, batch in enumerate(pbar):
         images = batch["pixel_values"].to(device)
         targets = batch["mask_labels"]
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
@@ -128,7 +130,7 @@ def validate_epoch(model, dataloader, criterion, device, metrics):
             gt_building = gt_masks_resized[building_mask]
             metrics.update(pred_probs.flatten(), gt_building.flatten().int())
         
-        pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+        pbar.set_postfix({'loss': f'{loss.item():.4f}'})
     
     epoch_metrics = metrics.compute()
     return total_loss / len(dataloader), epoch_metrics
@@ -213,6 +215,10 @@ def main():
     )
     model = model.to(device)
     
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Params: {total_params:,} total, {trainable_params:,} trainable")
+    
     criterion = CombinedLoss(
         ce_weight=cfg.loss_ce_weight,
         dice_weight=cfg.loss_dice_weight,
@@ -237,8 +243,8 @@ def main():
     train_metrics = get_metrics(device)
     val_metrics = get_metrics(device)
     
-    print(f"\nStage 1: Foundation Training")
-    print(f"Loss weights - CE:{cfg.loss_ce_weight} Dice:{cfg.loss_dice_weight} Focal:{cfg.loss_focal_weight} BCE:{cfg.loss_bce_weight} Hausdorff:{cfg.loss_hausdorff_weight}")
+    print(f"\nStage 1 Training: BS={cfg.stage1_batch_size}, Accum={cfg.gradient_accumulation_steps}, EffectiveBS={cfg.stage1_batch_size * cfg.gradient_accumulation_steps}")
+    print(f"Loss: CE={cfg.loss_ce_weight}, Dice={cfg.loss_dice_weight}, Focal={cfg.loss_focal_weight}, BCE={cfg.loss_bce_weight}, Hausdorff={cfg.loss_hausdorff_weight}")
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     
     best_val_loss = float("inf")
@@ -250,8 +256,8 @@ def main():
         val_loss, val_m = validate_epoch(model, val_loader, criterion, device, val_metrics)
         scheduler.step()
         
-        print(f"Train - Loss: {train_loss:.4f} | Acc: {train_m['accuracy']:.4f} | P: {train_m['precision']:.4f} | R: {train_m['recall']:.4f} | F1: {train_m['f1']:.4f}")
-        print(f"Val   - Loss: {val_loss:.4f} | Acc: {val_m['accuracy']:.4f} | P: {val_m['precision']:.4f} | R: {val_m['recall']:.4f} | F1: {val_m['f1']:.4f}")
+        print(f"Train: Loss={train_loss:.4f} Acc={train_m['accuracy']:.4f} P={train_m['precision']:.4f} R={train_m['recall']:.4f} F1={train_m['f1']:.4f}")
+        print(f"Val:   Loss={val_loss:.4f} Acc={val_m['accuracy']:.4f} P={val_m['precision']:.4f} R={val_m['recall']:.4f} F1={val_m['f1']:.4f}")
         
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -262,10 +268,10 @@ def main():
         if (epoch + 1) % cfg.checkpoint_freq == 0:
             ckpt_path = cfg.output_dir / f"stage1_epoch_{epoch + 1}.pt"
             save_checkpoint(model, optimizer, epoch, val_loss, ckpt_path)
-            print(f"Saved checkpoint: {ckpt_path}")
+            print(f"Checkpoint: {ckpt_path}")
         
         if early_stopping(val_loss):
-            print(f"\nEarly stopping at epoch {epoch + 1}")
+            print(f"Early stopping at epoch {epoch + 1}")
             break
     
     print(f"\nStage 1 complete. Best val loss: {best_val_loss:.4f}")
