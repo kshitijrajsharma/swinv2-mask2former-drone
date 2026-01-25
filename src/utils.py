@@ -10,6 +10,8 @@ import segmentation_models_pytorch as smp
 from kornia.losses import HausdorffERLoss
 from torch import nn
 from torchgeo.datasets import IntersectionDataset, RasterDataset, VectorDataset
+from torchmetrics import MetricCollection
+from torchmetrics.classification import BinaryAccuracy, BinaryPrecision, BinaryRecall, BinaryF1Score
 from tqdm import tqdm
 
 
@@ -143,6 +145,15 @@ def collate_fn_mask2former(batch: list[dict[str, Any]]) -> dict[str, Any]:
     return {"pixel_values": images, "mask_labels": targets}
 
 
+def get_metrics(device):
+    return MetricCollection({
+        'accuracy': BinaryAccuracy(),
+        'precision': BinaryPrecision(),
+        'recall': BinaryRecall(),
+        'f1': BinaryF1Score(),
+    }).to(device)
+
+
 class CombinedLoss(nn.Module):
     def __init__(self, ce_weight=2.0, dice_weight=5.0, focal_weight=5.0, bce_weight=1.0, hausdorff_weight=0.1):
         super().__init__()
@@ -192,13 +203,11 @@ class CombinedLoss(nn.Module):
             loss += self.bce_weight * bce
         
         if self.hausdorff_weight > 0:
-            try:
-                pred_sigmoid = torch.sigmoid(pred_masks_flat)
-                hd = self.hausdorff_loss(pred_sigmoid, gt_masks_flat)
-                loss += self.hausdorff_weight * hd
-            except Exception:
-                pass
-        
+            pred_2ch = torch.cat([-pred_masks_flat, pred_masks_flat], dim=1)
+            gt_masks_long = gt_masks_flat.long()
+            hd = self.hausdorff_loss(pred_2ch, gt_masks_long)
+            loss += self.hausdorff_weight * hd
+            
         return loss
 
 
