@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import DataLoader
-from torchgeo.samplers import RandomBatchGeoSampler
+from torchgeo.samplers import RandomGeoSampler
 from tqdm import tqdm
 from transformers import Mask2FormerForUniversalSegmentation
 
@@ -9,7 +9,7 @@ from utils import (
     CombinedLoss,
     EarlyStopping,
     collate_fn_mask2former,
-    compute_num_queries,
+    compute_num_queries_from_geojson,
     get_all_ramp_regions,
     get_ramp_dataset,
     save_checkpoint,
@@ -18,10 +18,35 @@ from utils import (
 )
 
 
+def pad_targets_to_queries(targets, num_queries, device):
+    """Pad or truncate targets to match num_queries"""
+    gt_masks = []
+    gt_labels = []
+    
+    for t in targets:
+        masks = t["masks"]
+        labels = t["class_labels"]
+        num_instances = masks.shape[0]
+        
+        if num_instances < num_queries:
+            pad_size = num_queries - num_instances
+            masks = torch.cat([masks, torch.zeros(pad_size, *masks.shape[1:], device=device, dtype=masks.dtype)])
+            labels = torch.cat([labels, torch.zeros(pad_size, device=device, dtype=labels.dtype)])
+        elif num_instances > num_queries:
+            masks = masks[:num_queries]
+            labels = labels[:num_queries]
+        
+        gt_masks.append(masks)
+        gt_labels.append(labels)
+    
+    return torch.stack(gt_masks), torch.stack(gt_labels)
+
+
 def train_epoch(model, dataloader, criterion, optimizer, device, grad_accum_steps=1):
     model.train()
     total_loss = 0.0
     optimizer.zero_grad()
+    num_queries = model.config.num_queries
     
     pbar = tqdm(dataloader, desc="Training")
     for idx, batch in enumerate(pbar):
@@ -34,22 +59,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, grad_accum_step
         pred_masks = outputs.masks_queries_logits
         pred_logits = outputs.class_queries_logits
         
-        max_instances = max(t["masks"].shape[0] for t in targets)
-        gt_masks = []
-        gt_labels = []
-        
-        for t in targets:
-            masks = t["masks"]
-            labels = t["class_labels"]
-            if masks.shape[0] < max_instances:
-                pad_size = max_instances - masks.shape[0]
-                masks = torch.cat([masks, torch.zeros(pad_size, *masks.shape[1:], device=masks.device, dtype=masks.dtype)])
-                labels = torch.cat([labels, torch.zeros(pad_size, device=labels.device, dtype=labels.dtype)])
-            gt_masks.append(masks)
-            gt_labels.append(labels)
-        
-        gt_masks = torch.stack(gt_masks)
-        gt_labels = torch.stack(gt_labels)
+        gt_masks, gt_labels = pad_targets_to_queries(targets, num_queries, device)
         
         loss = criterion(pred_masks, pred_logits, gt_masks, gt_labels)
         loss = loss / grad_accum_steps
@@ -70,6 +80,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, grad_accum_step
 def validate_epoch(model, dataloader, criterion, device):
     model.eval()
     total_loss = 0.0
+    num_queries = model.config.num_queries
     
     pbar = tqdm(dataloader, desc="Validation")
     for batch in pbar:
@@ -82,22 +93,7 @@ def validate_epoch(model, dataloader, criterion, device):
         pred_masks = outputs.masks_queries_logits
         pred_logits = outputs.class_queries_logits
         
-        max_instances = max(t["masks"].shape[0] for t in targets)
-        gt_masks = []
-        gt_labels = []
-        
-        for t in targets:
-            masks = t["masks"]
-            labels = t["class_labels"]
-            if masks.shape[0] < max_instances:
-                pad_size = max_instances - masks.shape[0]
-                masks = torch.cat([masks, torch.zeros(pad_size, *masks.shape[1:], device=masks.device, dtype=masks.dtype)])
-                labels = torch.cat([labels, torch.zeros(pad_size, device=labels.device, dtype=labels.dtype)])
-            gt_masks.append(masks)
-            gt_labels.append(labels)
-        
-        gt_masks = torch.stack(gt_masks)
-        gt_labels = torch.stack(gt_labels)
+        gt_masks, gt_labels = pad_targets_to_queries(targets, num_queries, device)
         
         loss = criterion(pred_masks, pred_logits, gt_masks, gt_labels)
         total_loss += loss.item()
@@ -106,72 +102,76 @@ def validate_epoch(model, dataloader, criterion, device):
     return total_loss / len(dataloader)
 
 
+def create_dataloader(dataset, batch_size, num_samples, num_workers, is_train=True):
+    sampler = RandomGeoSampler(dataset, size=256, length=num_samples)
+    
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        num_workers=num_workers,
+        collate_fn=collate_fn_mask2former,
+        pin_memory=True,
+        drop_last=is_train,
+    )
+    
+    return loader
+
+
 def main():
     cfg = Config()
     set_seed(cfg.seed)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    print(f"Device: {device}")
     
-    print("Loading RAMP dataset...")
+    print("\nLoading RAMP dataset...")
     all_regions = get_all_ramp_regions(cfg.data_root)
     
     if cfg.train_regions and cfg.val_regions:
         train_regions = cfg.train_regions
         val_regions = cfg.val_regions
-        print(f"Using manual region split:")
-        print(f"  Train: {train_regions}")
-        print(f"  Val: {val_regions}")
+        print(f"Manual split - Train: {train_regions}, Val: {val_regions}")
     else:
         train_regions, val_regions = split_regions(all_regions, cfg.val_split, cfg.seed)
-        print(f"Using automatic region split (val_split={cfg.val_split}):")
-        print(f"  Train regions: {train_regions}")
-        print(f"  Val regions: {val_regions}")
+        print(f"Auto split (val={cfg.val_split}) - Train: {train_regions}, Val: {val_regions}")
     
-    train_dataset = get_ramp_dataset(cfg.data_root, train_regions, cfg.res)
-    val_dataset = get_ramp_dataset(cfg.data_root, val_regions, cfg.res)
-    print(f"Train size: {len(train_dataset)}, Val size: {len(val_dataset)}")
+    train_dataset, train_label_paths = get_ramp_dataset(cfg.data_root, train_regions, cfg.res)
+    val_dataset, val_label_paths = get_ramp_dataset(cfg.data_root, val_regions, cfg.res)
+    
+    print(f"\nDataset info:")
+    print(f"  Train bounds: {train_dataset.bounds}")
+    print(f"  Val bounds: {val_dataset.bounds}")
+    print(f"  Train CRS: {train_dataset.crs}")
     
     if cfg.num_queries == 0:
-        cfg.num_queries = compute_num_queries(train_dataset, num_samples=100)
+        print("\nComputing num_queries from GeoJSON...")
+        cfg.num_queries = compute_num_queries_from_geojson(train_label_paths)
     else:
         print(f"Using configured num_queries: {cfg.num_queries}")
     
-
-    # train_length = min(cfg.stage1_num_samples // cfg.stage1_batch_size, len(train_dataset) // 4)
-    # val_length = max(len(val_dataset) // 20, 10)
+    train_samples = cfg.stage1_batch_size * cfg.stage1_max_batches_per_epoch
+    val_samples = cfg.stage1_batch_size * max(10, cfg.stage1_max_batches_per_epoch // 5)
     
-    train_sampler = RandomBatchGeoSampler(
-        train_dataset,
-        size=256,
-        batch_size=cfg.stage1_batch_size,
-        length=100, # TODO : fix this to be cfg.stage1_num_samples or we try something better idk
+    print(f"\nCreating dataloaders: train_samples={train_samples}, val_samples={val_samples}")
+    
+    train_loader = create_dataloader(
+        train_dataset, 
+        cfg.stage1_batch_size, 
+        train_samples,
+        cfg.num_workers,
+        is_train=True
     )
     
-    val_sampler = RandomBatchGeoSampler(
+    val_loader = create_dataloader(
         val_dataset,
-        size=256,
-        batch_size=cfg.stage1_batch_size,
-        length=5,
+        cfg.stage1_batch_size,
+        val_samples,
+        cfg.num_workers,
+        is_train=False
     )
     
-    train_loader = DataLoader(
-        train_dataset,
-        batch_sampler=train_sampler,
-        num_workers=cfg.num_workers,
-        collate_fn=collate_fn_mask2former,
-        pin_memory=True,
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_sampler=val_sampler,
-        num_workers=cfg.num_workers,
-        collate_fn=collate_fn_mask2former,
-        pin_memory=True,
-    )
-    
-    print("Initializing Mask2Former...")
+    print("\nInitializing Mask2Former...")
     model = Mask2FormerForUniversalSegmentation.from_pretrained(
         cfg.pretrained_model,
         id2label={0: "background", 1: "building"},
@@ -201,8 +201,8 @@ def main():
     
     early_stopping = EarlyStopping(patience=cfg.early_stopping_patience)
     
-    print("\nStage 1: Foundation Training")
-    print(f"Loss weights - CE: {cfg.loss_ce_weight}, Dice: {cfg.loss_dice_weight}, Focal: {cfg.loss_focal_weight}, Hausdorff: {cfg.loss_hausdorff_weight}")
+    print(f"\nStage 1: Foundation Training")
+    print(f"Loss weights - CE:{cfg.loss_ce_weight} Dice:{cfg.loss_dice_weight} Focal:{cfg.loss_focal_weight} Hausdorff:{cfg.loss_hausdorff_weight}")
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     
     best_val_loss = float("inf")
@@ -220,7 +220,7 @@ def main():
             best_val_loss = val_loss
             best_path = cfg.output_dir / "stage1_best.pt"
             save_checkpoint(model, optimizer, epoch, val_loss, best_path)
-            print(f"Saved best checkpoint: {best_path}")
+            print(f"Saved best: {best_path}")
         
         if (epoch + 1) % cfg.checkpoint_freq == 0:
             ckpt_path = cfg.output_dir / f"stage1_epoch_{epoch + 1}.pt"
@@ -228,7 +228,7 @@ def main():
             print(f"Saved checkpoint: {ckpt_path}")
         
         if early_stopping(val_loss):
-            print(f"\nEarly stopping triggered at epoch {epoch + 1}")
+            print(f"\nEarly stopping at epoch {epoch + 1}")
             break
     
     print(f"\nStage 1 complete. Best val loss: {best_val_loss:.4f}")

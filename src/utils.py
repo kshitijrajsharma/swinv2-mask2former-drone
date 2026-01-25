@@ -1,15 +1,15 @@
 import random
 from pathlib import Path
 from typing import Any
+import json 
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from kornia.losses import dice_loss, focal_loss, hausdorff as hausdorff_distance_loss
+import segmentation_models_pytorch as smp
+from kornia.losses import HausdorffERLoss
 from torch import nn
-from torch.utils.data import Dataset
 from torchgeo.datasets import IntersectionDataset, RasterDataset, VectorDataset
-from torchgeo.samplers import RandomGeoSampler
 from tqdm import tqdm
 
 
@@ -34,6 +34,8 @@ class RAMPMaskDataset(VectorDataset):
 
 
 def get_ramp_dataset(root: Path, regions: list[str], res: float = 0.3):
+    from rasterio.crs import CRS
+    
     image_paths = []
     label_paths = []
     
@@ -49,10 +51,12 @@ def get_ramp_dataset(root: Path, regions: list[str], res: float = 0.3):
     if not image_paths:
         raise ValueError(f"No valid regions found in {root}")
     
-    images = RAMPImageDataset(paths=image_paths)
-    masks = RAMPMaskDataset(paths=label_paths, crs=images.crs, res=res)
+    target_crs = CRS.from_epsg(3857)
     
-    return IntersectionDataset(images, masks)
+    images = RAMPImageDataset(paths=image_paths, crs=target_crs, res=res)
+    masks = RAMPMaskDataset(paths=label_paths, crs=target_crs, res=res)
+    
+    return IntersectionDataset(images, masks), label_paths
 
 
 def get_all_ramp_regions(root: Path) -> list[str]:
@@ -63,7 +67,6 @@ def get_all_ramp_regions(root: Path) -> list[str]:
 
 
 def split_regions(regions: list[str], val_ratio: float = 0.2, seed: int = 42):
-    """Split regions into train and validation sets"""
     rng = random.Random(seed)
     shuffled = regions.copy()
     rng.shuffle(shuffled)
@@ -71,60 +74,42 @@ def split_regions(regions: list[str], val_ratio: float = 0.2, seed: int = 42):
     return shuffled[:split_idx], shuffled[split_idx:]
 
 
-def compute_num_queries(dataset: Dataset, num_samples: int = 100, percentile: float = 95.0) -> int:
-    """Compute optimal num_queries by sampling dataset
+def compute_num_queries_from_geojson(
+    label_paths: list[Path], 
+    percentile: float = 95.0,
+    buffer_ratio: float = 0.2,
+    min_queries: int = 50
+) -> int:
+    feature_counts = []
     
-    Args:
-        dataset: TorchGeo dataset
-        num_samples: Number of samples to check
-        percentile: Percentile to use (handles outliers)
-    
-    Returns:
-        Recommended num_queries value
-    """
-    print(f"Computing optimal num_queries from {num_samples} samples...")
-    
-    instance_counts = []
-    
-    try:
-        sampler = RandomGeoSampler(dataset, size=256, length=num_samples)
+    for label_path in label_paths:
+        geojson_files = list(Path(label_path).glob("*.geojson"))
         
-        for bbox in tqdm(sampler, desc="Sampling dataset", total=num_samples):
+        for geojson_file in tqdm(geojson_files, desc=f"Analyzing {label_path.name}", leave=False):
             try:
-                sample = dataset[bbox]
-                mask = sample["mask"]
-                
-                if mask.ndim == 2:
-                    num_instances = 1 if mask.sum() > 0 else 0
-                else:
-                    num_instances = sum(1 for i in range(mask.shape[0]) if mask[i].sum() > 10)
-                
-                instance_counts.append(num_instances)
+                with open(geojson_file, 'r') as f:
+                    data = json.load(f)
+                    if "features" in data:
+                        feature_counts.append(len(data["features"]))
             except Exception:
                 continue
-    except Exception as e:
-        print(f"Warning: Could not sample dataset: {e}")
-        return 100
     
-    if not instance_counts:
-        print("Warning: Could not compute num_queries, using default 100")
-        return 100
+    if not feature_counts:
+        print(f"Warning: No features found, using min_queries={min_queries}")
+        return min_queries
     
-    max_instances = int(np.percentile(instance_counts, percentile))
-    recommended = max(max_instances + 20, 50)
+    max_features = int(np.percentile(feature_counts, percentile))
+    recommended = max(int(max_features * (1 + buffer_ratio)), min_queries)
     
-    print(f"Instance statistics:")
-    print(f"  Mean: {np.mean(instance_counts):.1f}")
-    print(f"  Median: {np.median(instance_counts):.1f}")
-    print(f"  Max: {np.max(instance_counts)}")
-    print(f"  {percentile}th percentile: {max_instances}")
-    print(f"  Recommended num_queries: {recommended}")
+    print(f"Feature stats: mean={np.mean(feature_counts):.1f}, "
+          f"median={np.median(feature_counts):.1f}, "
+          f"p{percentile}={max_features}, "
+          f"recommended_queries={recommended}")
     
     return recommended
 
 
 def collate_fn_mask2former(batch: list[dict[str, Any]]) -> dict[str, Any]:
-    """Collate function for Mask2Former"""
     images = torch.stack([s["image"].float() / 255.0 for s in batch])
     
     targets = []
@@ -159,45 +144,57 @@ def collate_fn_mask2former(batch: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 class CombinedLoss(nn.Module):
-    """Combined loss: CE + Dice + Focal + Hausdorff"""
-    
-    def __init__(self, ce_weight=2.0, dice_weight=5.0, focal_weight=5.0, hausdorff_weight=0.1):
+    def __init__(self, ce_weight=2.0, dice_weight=5.0, focal_weight=5.0, bce_weight=1.0, hausdorff_weight=0.1):
         super().__init__()
         self.ce_weight = ce_weight
         self.dice_weight = dice_weight
         self.focal_weight = focal_weight
+        self.bce_weight = bce_weight
         self.hausdorff_weight = hausdorff_weight
+        
+        self.dice_loss = smp.losses.DiceLoss(mode='binary', from_logits=True)
+        self.focal_loss = smp.losses.FocalLoss(mode='binary', alpha=0.25, gamma=2.0)
+        self.bce_loss = nn.BCEWithLogitsLoss()
+        self.hausdorff_loss = HausdorffERLoss()
     
     def forward(self, pred_masks, pred_logits, gt_masks, gt_labels):
         B, Q, H, W = pred_masks.shape
         num_classes = pred_logits.shape[-1]
+        
+        if gt_masks.shape[-2:] != (H, W):
+            gt_masks = F.interpolate(
+                gt_masks.float(), 
+                size=(H, W), 
+                mode='nearest'
+            ).bool()
         
         loss = 0.0
         
         if pred_logits is not None and self.ce_weight > 0:
             pred_classes = pred_logits.view(B * Q, num_classes)
             target_classes = gt_labels.view(B * Q)
-            
             ce_loss = F.cross_entropy(pred_classes, target_classes, reduction="mean")
             loss += self.ce_weight * ce_loss
         
-        pred_masks_flat = pred_masks.view(B * Q, H, W)
-        gt_masks_flat = gt_masks.view(B * Q, H, W)
-        
-        pred_sigmoid = torch.sigmoid(pred_masks_flat)
-        gt_float = gt_masks_flat.float()
+        pred_masks_flat = pred_masks.view(B * Q, 1, H, W)
+        gt_masks_flat = gt_masks.view(B * Q, 1, H, W).float()
         
         if self.dice_weight > 0:
-            dice = dice_loss(pred_sigmoid, gt_float)
+            dice = self.dice_loss(pred_masks_flat, gt_masks_flat)
             loss += self.dice_weight * dice
         
         if self.focal_weight > 0:
-            focal = focal_loss(pred_masks_flat, gt_masks_flat.long(), alpha=0.25, gamma=2.0, reduction="mean")
+            focal = self.focal_loss(pred_masks_flat, gt_masks_flat)
             loss += self.focal_weight * focal
+        
+        if self.bce_weight > 0:
+            bce = self.bce_loss(pred_masks_flat, gt_masks_flat)
+            loss += self.bce_weight * bce
         
         if self.hausdorff_weight > 0:
             try:
-                hd = hausdorff_distance_loss(pred_sigmoid, gt_float)
+                pred_sigmoid = torch.sigmoid(pred_masks_flat)
+                hd = self.hausdorff_loss(pred_sigmoid, gt_masks_flat)
                 loss += self.hausdorff_weight * hd
             except Exception:
                 pass
@@ -206,8 +203,6 @@ class CombinedLoss(nn.Module):
 
 
 class EarlyStopping:
-    """Early stopping to stop training when validation loss doesn't improve"""
-    
     def __init__(self, patience=10, min_delta=0.0):
         self.patience = patience
         self.min_delta = min_delta
