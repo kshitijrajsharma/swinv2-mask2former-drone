@@ -24,6 +24,7 @@ class Mask2FormerModule(pl.LightningModule):
         super().__init__()
         self.cfg = cfg
         self.save_hyperparameters()
+        self.image_processor = get_image_processor(cfg.pretrained_model, 255)
 
         base_config = Mask2FormerConfig.from_pretrained(cfg.pretrained_model)
         base_config.num_labels = 2
@@ -56,20 +57,20 @@ class Mask2FormerModule(pl.LightningModule):
         )
 
     def _get_pred_masks(self, outputs, target_size):
-        masks_logits = outputs.masks_queries_logits
-        class_logits = outputs.class_queries_logits
-        pred_class = class_logits.argmax(dim=-1)
-        building_mask = (pred_class == 1).unsqueeze(-1).unsqueeze(-1)
-        masks_prob = torch.sigmoid(masks_logits)
-        masks_prob = masks_prob * building_mask.float()
-        pred_mask = masks_prob.max(dim=1)[0]
-        pred_mask = torch.nn.functional.interpolate(
-            pred_mask.unsqueeze(1),
-            size=target_size,
-            mode="bilinear",
-            align_corners=False,
-        ).squeeze(1)
-        return (pred_mask > 0.5).long()
+        results = self.image_processor.post_process_instance_segmentation(
+            outputs, target_sizes=[target_size] * outputs.masks_queries_logits.shape[0]
+        )
+        batch_masks = []
+        for r in results:
+            mask = torch.zeros(target_size, device=self.device, dtype=torch.long)
+            seg_map = r["segmentation"]  # [H, W] with instance IDs
+            for info in r["segments_info"]:
+                # print(info)
+                if info["label_id"] == 1:  # building
+                    print("yay building")
+                    mask = mask | (seg_map == info["id"]).long()
+            batch_masks.append(mask)
+        return torch.stack(batch_masks)
 
     def training_step(self, batch, batch_idx):
         mask_labels = [m.to(self.device) for m in batch["mask_labels"]]
@@ -85,14 +86,14 @@ class Mask2FormerModule(pl.LightningModule):
         return outputs.loss
 
     def on_train_epoch_end(self):
-        self.log_dict(self.train_metrics.compute(), prog_bar=True, sync_dist=True)
+        self.log_dict(self.train_metrics.compute(), sync_dist=True)
         self.train_metrics.reset()
 
     def validation_step(self, batch, batch_idx):
         mask_labels = [m.to(self.device) for m in batch["mask_labels"]]
         class_labels = [c.to(self.device) for c in batch["class_labels"]]
         outputs = self(batch["pixel_values"], mask_labels, class_labels)
-        self.log("val_loss", outputs.loss, prog_bar=True, sync_dist=True)
+        self.log("val_loss", outputs.loss, prog_bar=False, sync_dist=True)
 
         target = torch.stack([(m.sum(0) > 0).long() for m in mask_labels])
         preds = self._get_pred_masks(outputs, target.shape[-2:])

@@ -73,7 +73,7 @@ def get_image_processor(
     return Mask2FormerImageProcessor.from_pretrained(
         pretrained_model,
         num_labels=2,
-        do_reduce_labels=True,
+        # do_reduce_labels=True,
         ignore_index=255,
         size=size,
         do_normalize=True,
