@@ -197,14 +197,14 @@ def main():
 
     callbacks = [
         EarlyStopping(
-            monitor="train_loss",
+            monitor="val_loss",
             patience=cfg.early_stopping_patience,
-            mode="min",  # TODO : switch to val_loss
+            mode="min",
         ),
         ModelCheckpoint(
             dirpath=cfg.output_dir,
             filename="best",
-            monitor="train_loss",
+            monitor="val_loss",
             mode="min",
             save_top_k=1,
         ),
