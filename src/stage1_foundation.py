@@ -13,8 +13,8 @@ from torchmetrics.classification import (
 )
 from transformers import Mask2FormerConfig, Mask2FormerForUniversalSegmentation
 
-from config import Config
-from utils import (
+from src.config import Config
+from src.utils import (
     get_all_ramp_regions,
     get_image_processor,
     get_ramp_dataset,
@@ -54,6 +54,7 @@ class Mask2FormerModule(pl.LightningModule):
         )
         self.train_metrics = metrics.clone(prefix="train_")
         self.val_metrics = metrics.clone(prefix="val_")
+        self.test_metrics = metrics.clone(prefix="test_")
 
     def forward(self, pixel_values, mask_labels=None, class_labels=None):
         return self.model(
@@ -110,6 +111,22 @@ class Mask2FormerModule(pl.LightningModule):
         self.log_dict(self.val_metrics.compute(), prog_bar=True, sync_dist=True)
         self.val_metrics.reset()
 
+    def test_step(self, batch, batch_idx):
+        mask_labels = [m.to(self.device) for m in batch["mask_labels"]]
+        class_labels = [c.to(self.device) for c in batch["class_labels"]]
+        outputs = self(batch["pixel_values"], mask_labels, class_labels)
+        self.log("test_loss", outputs.loss, prog_bar=True, sync_dist=True)
+
+        target = torch.stack([(m.sum(0) > 0).long() for m in mask_labels])
+        preds = self._get_pred_masks(outputs, target.shape[-2:])
+        self.test_metrics.update(preds.flatten(), target.flatten())
+
+        return outputs.loss
+
+    def on_test_epoch_end(self):
+        self.log_dict(self.test_metrics.compute(), prog_bar=True, sync_dist=True)
+        self.test_metrics.reset()
+
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
             self.parameters(),
@@ -130,7 +147,7 @@ class Mask2FormerModule(pl.LightningModule):
         }
 
 
-class RAMPDataModule(pl.LightningDataModule):
+class OAMDataModule(pl.LightningDataModule):
     def __init__(self, cfg: Config):
         super().__init__()
         self.cfg = cfg
@@ -153,6 +170,8 @@ class RAMPDataModule(pl.LightningDataModule):
         print(f"Train dataset length: {len(self.train_dataset)}")
         self.val_dataset = get_ramp_dataset(self.cfg.data_root, val_regions)
         print(f"Val dataset length: {len(self.val_dataset)}")
+        self.test_dataset = get_ramp_dataset(self.cfg.data_root, self.cfg.test_regions)
+        print(f"Test dataset length: {len(self.test_dataset)}")
 
     def train_dataloader(self):
         sampler = RandomGeoSampler(
@@ -189,13 +208,31 @@ class RAMPDataModule(pl.LightningDataModule):
             drop_last=True,
         )
 
+    def test_dataloader(self):
+        sampler = RandomGeoSampler(
+            self.test_dataset,
+            size=256,
+            units=Units.PIXELS,
+        )
+        print("test_sampler length", len(sampler))
+
+        return DataLoader(
+            self.test_dataset,
+            sampler=sampler,
+            batch_size=self.cfg.batch_size,
+            num_workers=self.cfg.num_workers,
+            collate_fn=self.collate_fn,
+            pin_memory=True,
+            drop_last=True,
+        )
+
 
 def main():
     cfg = Config()
     set_seed(cfg.seed)
 
     model = Mask2FormerModule(cfg)
-    datamodule = RAMPDataModule(cfg)
+    datamodule = OAMDataModule(cfg)
 
     callbacks = [
         EarlyStopping(

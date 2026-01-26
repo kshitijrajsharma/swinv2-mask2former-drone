@@ -4,7 +4,7 @@ from pathlib import Path
 
 @dataclass
 class Config:
-    data_root: Path = Path("/home/krschap/data/banepa")
+    data_root: Path = Path("data/banepa")
     output_dir: Path = Path("outputs")
     seed: int = 64
 
@@ -21,6 +21,7 @@ class Config:
 
     train_regions: list[str] = field(default_factory=lambda: ["train"])
     val_regions: list[str] = field(default_factory=lambda: ["val"])
+    test_regions: list[str] = field(default_factory=lambda: ["test"])
 
     val_split: float = 0.2
     pretrained_model: str = (

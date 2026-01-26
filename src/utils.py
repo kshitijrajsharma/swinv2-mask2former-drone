@@ -24,6 +24,10 @@ class RAMPMaskDataset(VectorDataset):
             paths=paths, crs=crs, task="semantic_segmentation", **kwargs
         )  # torchgeo has bug on instance_seg , it drops polygon from geojson if its in edge but the mask remains , this is where the bug is : `torchgeo/datasets/geo.py` (lines ~1070-1100) #TODO : raise this to torchgeo
 
+        # super().__init__(
+        #     paths=paths, crs=crs, task="instance_segmentation", **kwargs
+        # )  # torchgeo has bug on instance_seg , it drops polygon from geojson if its in edge but the mask remains , this is where the bug is : `torchgeo/datasets/geo.py` (lines ~1070-1100) #TODO : raise this to torchgeo
+
 
 def get_ramp_dataset(root: Path, regions: list[str]):
 
