@@ -76,17 +76,6 @@ class Mask2FormerModule(pl.LightningModule):
         mask_labels = [m.to(self.device) for m in batch["mask_labels"]]
         class_labels = [c.to(self.device) for c in batch["class_labels"]]
 
-        # Debug first batch
-        if batch_idx == 0 and self.current_epoch == 0:
-            print(f"pixel_values shape: {batch['pixel_values'].shape}")
-            print(
-                f"pixel_values range: [{batch['pixel_values'].min():.3f}, {batch['pixel_values'].max():.3f}]"
-            )
-            print(f"mask_labels[0] shape: {mask_labels[0].shape}")
-            print(f"mask_labels[0] unique: {mask_labels[0].unique()}")
-            print(f"mask_labels[0] sum: {mask_labels[0].sum()}")
-            print(f"class_labels[0]: {class_labels[0]}")
-
         outputs = self(batch["pixel_values"], mask_labels, class_labels)
         self.log("train_loss", outputs.loss, prog_bar=True, sync_dist=True)
 
