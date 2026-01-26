@@ -4,7 +4,7 @@ from typing import Any
 
 import numpy as np
 import torch
-from torchgeo.datasets import IntersectionDataset, RasterDataset, VectorDataset
+from torchgeo.datasets import RasterDataset, VectorDataset
 from transformers import Mask2FormerImageProcessor
 
 
@@ -28,6 +28,7 @@ def get_ramp_dataset(root: Path, regions: list[str], res: float = 0.4):
     from rasterio.crs import CRS
 
     image_paths, label_paths = [], []
+    print(f"Finding image,label path for {regions}...")
     for region in regions:
         region_path = root / region
         img_path, lbl_path = region_path / "source", region_path / "labels"
@@ -39,9 +40,12 @@ def get_ramp_dataset(root: Path, regions: list[str], res: float = 0.4):
         raise ValueError(f"No valid regions found in {root}")
 
     target_crs = CRS.from_epsg(3857)
+    print("Loading images ...")
     images = RAMPImageDataset(paths=image_paths, crs=target_crs, res=res, cache=True)
+    print(f"Loaded {len(images)} image tiles.")
+    print("Loading labels ...")
     masks = RAMPMaskDataset(paths=label_paths, crs=target_crs, res=res)
-
+    print(f"Loaded {len(masks)} mask tiles.")
     return images & masks
 
 
@@ -76,21 +80,38 @@ def get_image_processor(
 
 
 def make_collate_fn(image_processor: Mask2FormerImageProcessor):
-    def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
+    def collate_fn(
+        batch: list[dict[str, Any]],
+    ) -> dict[str, Any]:  # source : https://debuggercafe.com/fine-tuning-mask2former/
         images = [sample["image"].float() for sample in batch]
+        inputs = image_processor(images=images, return_tensors="pt")
 
-        masks = []
+        mask_labels = []
+        class_labels = []
+
         for sample in batch:
             mask = sample["mask"]
             if mask.ndim == 2:
                 mask = mask.unsqueeze(0)
-            instance_mask = mask.numpy().astype(np.int32)
-            masks.append(instance_mask)
 
-        encoded = image_processor(
-            images=images, segmentation_maps=masks, return_tensors="pt"
-        )
-        return encoded
+            instance_masks = []
+            instance_classes = []
+
+            for i in range(mask.shape[0]):
+                instance_masks.append(mask[i].float())
+                instance_classes.append(1)
+
+            if instance_masks:
+                mask_labels.append(torch.stack(instance_masks))
+                class_labels.append(torch.tensor(instance_classes, dtype=torch.long))
+            else:
+                H, W = mask.shape[-2:]
+                mask_labels.append(torch.zeros((0, H, W), dtype=torch.float32))
+                class_labels.append(torch.tensor([255], dtype=torch.long))
+
+        inputs["mask_labels"] = mask_labels
+        inputs["class_labels"] = class_labels
+        return inputs
 
     return collate_fn
 

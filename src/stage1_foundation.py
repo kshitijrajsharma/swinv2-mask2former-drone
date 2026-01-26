@@ -44,16 +44,16 @@ class Mask2FormerModule(pl.LightningModule):
         )
 
     def training_step(self, batch, batch_idx):
-        outputs = self(
-            batch["pixel_values"], batch["mask_labels"], batch["class_labels"]
-        )
+        mask_labels = [m.to(self.device) for m in batch["mask_labels"]]
+        class_labels = [c.to(self.device) for c in batch["class_labels"]]
+        outputs = self(batch["pixel_values"], mask_labels, class_labels)
         self.log("train_loss", outputs.loss, prog_bar=True, sync_dist=True)
         return outputs.loss
 
     def validation_step(self, batch, batch_idx):
-        outputs = self(
-            batch["pixel_values"], batch["mask_labels"], batch["class_labels"]
-        )
+        mask_labels = [m.to(self.device) for m in batch["mask_labels"]]
+        class_labels = [c.to(self.device) for c in batch["class_labels"]]
+        outputs = self(batch["pixel_values"], mask_labels, class_labels)
         self.log("val_loss", outputs.loss, prog_bar=True, sync_dist=True)
         return outputs.loss
 
@@ -100,12 +100,10 @@ class RAMPDataModule(pl.LightningDataModule):
         )
         return DataLoader(
             self.train_dataset,
-            batch_size=self.cfg.batch_size,
-            sampler=sampler,
+            batch_sampler=sampler,
             num_workers=self.cfg.num_workers,
             collate_fn=self.collate_fn,
             pin_memory=True,
-            drop_last=True,
         )
 
     def val_dataloader(self):
@@ -114,8 +112,7 @@ class RAMPDataModule(pl.LightningDataModule):
         )
         return DataLoader(
             self.val_dataset,
-            batch_size=self.cfg.batch_size,
-            sampler=sampler,
+            batch_sampler=sampler,
             num_workers=self.cfg.num_workers,
             collate_fn=self.collate_fn,
             pin_memory=True,
