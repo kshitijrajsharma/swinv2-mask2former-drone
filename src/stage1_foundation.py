@@ -10,6 +10,7 @@ from torchmetrics.classification import (
     BinaryF1Score,
     BinaryPrecision,
     BinaryRecall,
+    BinaryJaccardIndex,
 )
 from transformers import Mask2FormerConfig, Mask2FormerForUniversalSegmentation
 
@@ -50,6 +51,7 @@ class Mask2FormerModule(pl.LightningModule):
                 "p": BinaryPrecision(),
                 "r": BinaryRecall(),
                 "f1": BinaryF1Score(),
+                "iou": BinaryJaccardIndex(), # https://lightning.ai/docs/torchmetrics/stable/classification/jaccard_index.html
             }
         )
         self.train_metrics = metrics.clone(prefix="train_")
@@ -280,15 +282,15 @@ def main():
 
     callbacks = [
         EarlyStopping(
-            monitor="val_loss",
+            monitor="val_iou",
             patience=cfg.early_stopping_patience,
-            mode="min",
+            mode="max",
         ),
         ModelCheckpoint(
             dirpath=cfg.output_dir,
             filename="best",
-            monitor="val_loss",
-            mode="min",
+            monitor="val_iou",
+            mode="max",
             save_top_k=1,
         ),
     ]
