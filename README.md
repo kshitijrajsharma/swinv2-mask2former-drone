@@ -2,6 +2,8 @@
 
 This document outlines an experimental architecture exploration for high res images mainly for buildnig segmentation. I started with from the [RAMP](https://rampml.global/) (Replicable AI for Microplanning) 2020 Efficient-U-Net model. The original model represents excellent work by the RAMP team and has proven effective across diverse contexts. However, I've identified opportunities to enhance performance specifically in dense urban settlements by adopting recent advances in instance segmentation.
 
+See Model Architecture Detail [here](docs/Model_achitecture.md)
+
 ### Motivation
 
 The current U-Net architecture encounters three specific technical challenges in dense informal settlements:
