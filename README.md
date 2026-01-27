@@ -103,6 +103,8 @@ Stage 1 uses fixed hyperparameters. All tuning occurs during Stage 2 using (optu
 
 ### Learning Rate
 
+We use : Adam with decoupled weight decay (AdamW)[https://arxiv.org/pdf/1711.05101]
+
 - Standard: 1e-4 (may be starting point)
 - Conservative: 1e-5 (if validation loss oscillates)
 - Aggressive: 5e-4 (if convergence is too slow)
