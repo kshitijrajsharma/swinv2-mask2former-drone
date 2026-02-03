@@ -35,7 +35,10 @@ class Config:
     dice_weight: float = 5.0
     mask_weight: float = 5.0
     class_weight: float = 5.0
-    boundary_loss_weight: float = 5.0  
+
+    boundary_loss_weight: float = 5.0 
+    compactness_loss_weight: float = 5.0
+
     learning_rate: float = 0.00001
     weight_decay: float = 0.0001
     early_stopping_patience: int = 10
