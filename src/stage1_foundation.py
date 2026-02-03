@@ -434,13 +434,13 @@ def main():
         EarlyStopping(
             monitor="val_loss",
             patience=cfg.early_stopping_patience,
-            mode="max",
+            mode="min",
         ),
         ModelCheckpoint(
             dirpath=cfg.output_dir,
             filename="best",
             monitor="val_loss",
-            mode="max",
+            mode="min",
             save_top_k=1,
         ),
     ]

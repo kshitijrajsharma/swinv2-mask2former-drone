@@ -2,7 +2,7 @@
 
 This document outlines an experimental architecture exploration for high res images mainly for buildnig segmentation. I started with from the [RAMP](https://rampml.global/) (Replicable AI for Microplanning) 2020 Efficient-U-Net model. The original model represents excellent work by the RAMP team and has proven effective across diverse contexts. However, I've identified opportunities to enhance performance specifically in dense urban settlements by adopting recent advances in instance segmentation.
 
-See Model Architecture Detail [here](docs/Model_achitecture.md)
+See Model Architecture Detail [here](docs/Model_architecture.md)
 
 ### Motivation
 
@@ -16,7 +16,7 @@ This experiment proposes a composable architecture combining modern feature extr
 
 ```mermaid
 graph TD
-    A["Input: 30cm RGB Aerial Image (TorchGeo)"] --> B["Backbone: Swin Transformer V2"]
+    A["Input: RGB Aerial Image 256x256 (TorchGeo)"] --> B["Backbone: Swin Transformer V2"]
     B -->|"Features at 1/4, 1/8, 1/16, 1/32 scale"| C["Pixel Decoder: Multi-Scale Deformable Attention"]
     C --> D["Transformer Decoder: Mask2Former"]
     D -->|"Query 1"| E["Mask 1: Building A"]
@@ -33,38 +33,38 @@ graph TD
 
 | Component | Selection | Justification |
 |----------|-----------|---------------|
-| Backbone | Swin Transformer V2 (Base) | Optimized for high-resolution windows (512×512). Captures texture and geometry better than CNNs. Pretrained on ImageNet-22K. |
+| Backbone | Swin Transformer V2 (Base) | Optimized for high-resolution windows (256×256). Captures texture and geometry better than CNNs. Pretrained on ImageNet-22K. |
 | Head | Mask2Former | Uses 100 learnable queries to predict instance masks. Treats each building as a separate object, solving the blob problem. |
-| Adapter | LoRA (Rank = 16) | Applied during Stage 2 fine-tuning. Enables geographic adaptation without catastrophic forgetting. |
+| Adapter | LoRA (Rank = 16) | Planned for Stage 2 fine-tuning. Enables geographic adaptation without catastrophic forgetting. |
 
-Masked-attention Mask Transformer for Universal Image Segmentation : 
+Masked-attention Mask Transformer for Universal Image Segmentation :
 <img width="700" height="493" alt="image" src="https://github.com/user-attachments/assets/520f8461-b253-4aa2-b852-b9169b0949cf" />
-
-
 
 ## Training Strategy: Two-Stage Curriculum
 
 We use curriculum learning to leverage large-scale RAMP data while preventing overfitting on target sites.
 
-### Stage 1: Foundation Training (RAMP Supervised)
+### Stage 1: Foundation Training (Current Implementation)
 
 Goal: Teach semantic distinction between roof and ground in informal settlements.
 
-- **Data**: 100,000 labeled RAMP image chips
+- **Data**: Currently using Banepa dataset (train/val/test splits)
 - **Method**: Full fine-tuning (Backbone + Head)
 - **Initialization**:
-  - Backbone: ImageNet-22K pretrained weights
-  - Head: Random initialization ( Perhaps I can find some pretrained weight here as well , perhaps COCO weights ? ) , and perhaps num_queries should be computed based on the stats in ramp dataset we do max no of features in per tile , we can do it via geojson features , which is basically no of buildings and then we  increase it 
-- **Hyperparameters**: Fixed standard defaults ( Can't afford gpu to do so ) 
-- **Outcome**: Assuming a binary segmentation mask for building
-- 
-### Stage 2: Site-Specific Adaptation
+  - Backbone: ImageNet-22K pretrained weights (Swin Transformer V2)
+  - Head: COCO pretrained weights (facebook/mask2former-swin-base-IN21k-coco-instance)
+  - 100 fixed learnable queries (from COCO pretraining)
+- **Hyperparameters**: Fixed (learning_rate=1e-5, weight_decay=1e-4, batch_size=8, epochs=10)
+- **Outcome**: Binary segmentation model with instance-aware predictions
+- **Training**: 256x256 pixel chips with boundary-weighted Dice loss
 
-Goal: Adapt to local soil colors, lighting, and building styles. , I am targeting around 1000 chips which is ideal for production level env
+### Stage 2: Site-Specific Adaptation (Planned)
 
-- Data: 1,000 project-specific chips (800 train / 200 validation)
-- Method: Frozen backbone + LoRA adapters + trainable head
-- Outcome: Site-specific model with strong generalization
+Goal: Adapt to local soil colors, lighting, and building styles for production deployment.
+
+- **Data**: 1,000 project-specific chips (800 train / 200 validation) - target for production
+- **Method**: Frozen backbone + LoRA adapters + trainable head (not yet implemented)
+- **Outcome**: Site-specific model with strong generalization
 
 ## Loss Function
 
@@ -73,24 +73,26 @@ To address irregular building shapes, we extend standard Mask2Former loss with b
 ### Total Loss
 
 $$
-\mathcal{L}_{total} = \lambda_{ce}\,\mathcal{L}_{CE} + \lambda_{dice}\,\mathcal{L}_{Dice} + \lambda_{focal}\,\mathcal{L}_{Focal} + \alpha \cdot \mathcal{L}_{Boundary}
+\mathcal{L}_{total} = \mathcal{L}_{base} + \alpha \cdot \mathcal{L}_{BoundaryDice}
 $$
 
-### Loss functions 
+Where $\mathcal{L}_{base}$ is the Mask2Former base loss (class loss + dice loss + mask loss) computed internally, and $\alpha$ is the boundary loss weight.
+
+### Loss functions
 
 - Cross-Entropy (L_CE): Binary classification (building vs background)
 - Dice Loss (L_Dice): Optimizes spatial overlap
-- Focal Loss (L_Focal): Emphasizes hard-to-classify pixels ( Mask2former have replaced focal loss with cross entropy, Both those loss has been added as mask loss in mask2former : maskloss = diceloss + cross entropy loss, source : https://davidhuangal.bearblog.dev/mask2former/ ) , Hence we might not use focal loss in our case.
-- Hausdorff Boundary Loss (L_Boundary): Penalizes edge mismatch, enforcing sharp corners, I think this is important for our irregular geometry problem ( yet to be implemented)
+- Mask Loss: Combination of Dice loss and cross-entropy loss (Mask2Former replaced focal loss with cross-entropy. Source: <https://davidhuangal.bearblog.dev/mask2former/>)
+- Boundary Dice Loss (L_Boundary): Boundary-weighted Dice loss that penalizes edge mismatch using 10x weight for boundary pixels, enforcing sharp corners for irregular geometries (implemented in training_step)
 
 ## Implementation Details
 
 ### Hardware & Setup
 
 - GPU: ( Not sure yet )
-- Data Loading: TorchGeo streaming GeoTIFFs
+- Data Loading: TorchGeo streaming GeoTIFFs with RandomGeoSampler (256 pixel size)
 - Bridge: Custom collate_fn converting TorchGeo tensors to Mask2Former format
-- Memory Management: gradient_accumulation_steps = 8 (simulates batch size ~32)
+- Batch Size: 8 (default in config)
 
 ### Estimated Timeline
 
@@ -98,29 +100,32 @@ $$
 |----------|----------|-------|
 | Code Implementation | ~x hours | collate_fn and model definition |
 
+## Current Hyperparameters (Stage 1)
 
-## Hyperparameter Tuning (Stage 2 Only)
+Currently implementing Stage 1 with fixed hyperparameters (Stage 2 with LoRA and Optuna tuning is planned).
 
-Stage 1 uses fixed hyperparameters. All tuning occurs during Stage 2 using (optuna)[https://pypi.org/project/optuna/] on the 200-chip validation set.
+### Optimizer Configuration
 
-### Learning Rate
+Using AdamW (Adam with decoupled weight decay): [https://arxiv.org/pdf/1711.05101](https://arxiv.org/pdf/1711.05101)
 
-We use : Adam with decoupled weight decay (AdamW)[https://arxiv.org/pdf/1711.05101]
+- **Learning Rate**: 1e-5 (0.00001) - conservative for fine-tuning pretrained model
+- **Weight Decay**: 1e-4 (0.0001) - L2 regularization
+- **Scheduler**: CosineAnnealingLR over 10 epochs
 
-- Standard: 1e-4 (may be starting point)
-- Conservative: 1e-5 (if validation loss oscillates)
-- Aggressive: 5e-4 (if convergence is too slow)
+### Loss Weights
 
-### Boundary Loss Weight (α)
+- **Class Weight**: 5.0
+- **Dice Weight**: 5.0
+- **Mask Weight**: 5.0
+- **Boundary Loss Weight**: 2.0
 
-- Low: 0.1 (may be start)
-- High: 0.5–1.0 (if edges remain irregular despite good separation)
+### Future Tuning Plans (Stage 2)
 
-### LoRA Rank
+Stage 2 will involve hyperparameter tuning using Optuna on validation set:
 
-- Standard: 16 (may be best balance)
-- Low: 8 (if overfitting occurs)
-- High: 32 (if model fails to capture new roof textures)
+- LoRA adapter configuration (rank 8/16/32)
+- Learning rate adjustment
+- Boundary loss weight optimization
 
 ## References
 
@@ -133,4 +138,4 @@ We use : Adam with decoupled weight decay (AdamW)[https://arxiv.org/pdf/1711.051
 3. Kervadec et al. (2019). Boundary Loss for Highly Unbalanced Segmentation. MIDL 2019.  
    [https://arxiv.org/abs/1812.07032](https://arxiv.org/abs/1812.07032)
 4. Download RAMP Data : [https://source.coop/ramp/ramp](https://source.coop/ramp/ramp)
-5. RAMP Docs : [https://rampml.global/training-data/](https://rampml.global/training-data/) 
+5. RAMP Docs : [https://rampml.global/training-data/](https://rampml.global/training-data/)

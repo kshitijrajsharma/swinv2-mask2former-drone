@@ -12,8 +12,6 @@ The following files were used as context for generating this wiki page:
 
 </details>
 
-
-
 ## Purpose and Scope
 
 This document details the neural network architecture used for high-resolution building segmentation, including the Swin Transformer V2 backbone, Mask2Former head with 100 learnable queries for instance segmentation, and the multi-component loss function. For information about the two-stage training strategy that uses this architecture, see [Two-Stage Training Architecture](#1.1). For implementation details of the training pipeline, see [Training Pipeline](#3).
@@ -80,6 +78,7 @@ The `Mask2FormerModule` class wraps the pretrained `Mask2FormerForUniversalSegme
 | `class_weight` | 5.0 (default) | Weight for classification loss component |
 | `dice_weight` | 5.0 (default) | Weight for Dice loss component |
 | `mask_weight` | 5.0 (default) | Weight for mask loss component |
+| `boundary_loss_weight` | 2.0 (default) | Weight for boundary-weighted Dice loss component |
 
 The model is initialized from pretrained weights with `ignore_mismatched_sizes=True` to accommodate the change from COCO's 80 classes to binary classification.
 
@@ -110,6 +109,7 @@ The backbone uses Swin Transformer V2 Base architecture, which processes images 
 - **Parameter Efficiency**: Attention computed within local windows, not globally
 
 The backbone extracts features at four scales:
+
 - **Stage 1** (1/4 resolution): Early spatial features with 96 channels
 - **Stage 2** (1/8 resolution): Mid-level features with 192 channels  
 - **Stage 3** (1/16 resolution): High-level features with 384 channels
@@ -130,6 +130,7 @@ The pixel decoder aggregates multi-scale features from all backbone stages using
 ### Transformer Decoder
 
 The transformer decoder uses **100 learnable queries** (object queries) to predict individual building instances. Each query:
+
 - Learns to attend to specific regions in the feature maps
 - Produces one class prediction (building vs. background)
 - Generates one binary mask covering the building extent
@@ -202,21 +203,15 @@ graph TB
     Forward["forward()<br/>pixel_values, mask_labels, class_labels"]
     
     subgraph Losses["Loss Components"]
-        ClassLoss["Classification Loss<br/>Cross-Entropy<br/>Weight: cfg.class_weight"]
-        DiceLoss["Dice Loss<br/>Overlap IoU<br/>Weight: cfg.dice_weight"]
-        MaskLoss["Mask Loss<br/>Binary Cross-Entropy<br/>Weight: cfg.mask_weight"]
-        BoundaryLoss["Hausdorff Boundary Loss<br/>Optional: via Kornia<br/>Sharp corner enforcement"]
+        BaseLoss["Base Loss (outputs.loss)<br/>Class + Dice + Mask<br/>Computed by model"]
+        BoundaryLoss["Boundary Dice Loss<br/>10x weight on edges<br/>Weight: cfg.boundary_loss_weight (2.0)"]
     end
     
-    Forward --> ClassLoss
-    Forward --> DiceLoss
-    Forward --> MaskLoss
-    Forward -.-> BoundaryLoss
+    Forward --> BaseLoss
+    Forward --> BoundaryLoss
     
-    ClassLoss --> Total["outputs.loss<br/>Weighted Sum"]
-    DiceLoss --> Total
-    MaskLoss --> Total
-    BoundaryLoss -.-> Total
+    BaseLoss --> Total["total_loss<br/>base_loss + boundary_weight * boundary_loss"]
+    BoundaryLoss --> Total
     
     Total --> BackProp["Backpropagation<br/>training_step()<br/>validation_step()"]
 ```
@@ -233,15 +228,15 @@ Measures the overlap between predicted and ground truth masks using the Dice coe
 
 Applied at the pixel level within each predicted mask. Provides fine-grained supervision for mask boundaries. Weight controlled by `cfg.mask_weight` (default: 5.0).
 
-### Hausdorff Boundary Loss (Optional)
+### Boundary Dice Loss (Implemented)
 
-Not currently implemented in the main training pipeline but planned for addressing irregular geometries. This loss would penalize edge mismatches using the Hausdorff distance, enforcing sharp corners and precise boundaries critical for GIS vectorization.
+Implemented in the training pipeline to address irregular geometries. This boundary-weighted Dice loss penalizes edge mismatches by applying 10x weight to boundary pixels (detected via max_pool - avg_pool edge detection). Weight controlled by `cfg.boundary_loss_weight` (default: 2.0). Added to base loss in `training_step()`.
 
 The total loss is computed as:
 
-$$\mathcal{L}_{total} = \lambda_{class} \cdot \mathcal{L}_{CE} + \lambda_{dice} \cdot \mathcal{L}_{Dice} + \lambda_{mask} \cdot \mathcal{L}_{Mask} + \alpha \cdot \mathcal{L}_{Boundary}$$
+$$\mathcal{L}_{total} = \mathcal{L}_{base} + \alpha \cdot \mathcal{L}_{BoundaryDice}$$
 
-Where λ parameters are configurable via the `Config` dataclass.
+Where $\mathcal{L}_{base}$ is the Mask2Former internal loss (class + dice + mask), computed by the model, and $\alpha$ is `cfg.boundary_loss_weight` (default: 2.0).
 
 **Sources:** [src/stage1_foundation.py:39-41](), [src/config.py:35-37](), [README.md:67-82]()
 
@@ -255,10 +250,14 @@ The `Mask2FormerModule` tracks binary classification metrics during training, va
 | Binary Precision | Proportion of predicted buildings that are correct | `BinaryPrecision()` |
 | Binary Recall | Proportion of actual buildings detected | `BinaryRecall()` |
 | Binary F1 Score | Harmonic mean of precision and recall | `BinaryF1Score()` |
+| Binary IoU | Intersection over Union (Jaccard Index) | `BinaryJaccardIndex()` |
+| Mean Average Precision (mAP) | Instance-level detection quality | `MeanAveragePrecision()` |
+| mAP@0.5 | Instance IoU threshold at 0.5 | `MeanAveragePrecision()` |
 
 Metrics are computed by flattening predicted and ground truth masks and comparing them pixel-wise. The model maintains separate `MetricCollection` instances for train, validation, and test phases with appropriate prefixes (`train_`, `val_`, `test_`).
 
 During each step (`training_step`, `validation_step`, `test_step`), the model:
+
 1. Performs forward pass to compute loss
 2. Post-processes outputs to generate final predictions via `_get_pred_masks()`
 3. Updates metrics by comparing predictions to ground truth
@@ -314,12 +313,13 @@ The model uses the AdamW optimizer with cosine annealing learning rate schedule,
 | Parameter | Default Value | Description |
 |-----------|---------------|-------------|
 | Optimizer | AdamW | Weight decay variant of Adam |
-| Learning Rate | 1e-5 | Initial learning rate from `cfg.learning_rate` |
-| Weight Decay | 1e-4 | L2 regularization penalty from `cfg.weight_decay` |
+| Learning Rate | 1e-5 (0.00001) | Initial learning rate from `cfg.learning_rate` |
+| Weight Decay | 1e-4 (0.0001) | L2 regularization penalty from `cfg.weight_decay` |
 | Scheduler | CosineAnnealingLR | Gradually reduces LR to 0 over training |
-| T_max | `cfg.epochs` | Number of epochs for full cosine cycle |
+| T_max | `cfg.epochs` (10) | Number of epochs for full cosine cycle |
 
 The cosine annealing schedule provides:
+
 - Smooth learning rate decay from initial value to near-zero
 - Better convergence properties than step decay
 - No need for manual LR adjustment during training
@@ -336,12 +336,15 @@ The `visualize_batch()` method provides side-by-side comparison of inputs, groun
 model.visualize_batch(batch, num_samples=4, save_path="outputs/predictions.png")
 ```
 
-The visualization creates a grid with three columns:
+The visualization creates a grid with four columns:
+
 1. **Image**: Normalized input RGB image
 2. **Ground Truth**: Binary mask from annotations  
-3. **Prediction**: Model's predicted binary mask
+3. **Binary Prediction**: Model's predicted binary mask
+4. **Instances**: Colored visualization showing individual building instances detected
 
 This method:
+
 - Sets model to evaluation mode (`self.eval()`)
 - Performs inference without gradient computation
 - Post-processes outputs via `_get_pred_masks()`
