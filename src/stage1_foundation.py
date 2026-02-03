@@ -76,11 +76,12 @@ class Mask2FormerModule(pl.LightningModule):
         """Extract boundary pixels and create weight map emphasizing edges."""
         if masks.dim() == 3:
             masks = masks.unsqueeze(1)
-        
+        # Edge detection: max_pool - avg_pool
         boundaries = F.max_pool2d(masks.float(), kernel_size, stride=1, padding=kernel_size//2)
         boundaries = boundaries - F.avg_pool2d(masks.float(), kernel_size, stride=1, padding=kernel_size//2)
         boundaries = (boundaries.abs() > 0.1).float()
         
+        # Boundary pixels get 10x weight, interior pixels get 1x
         weights = torch.ones_like(masks.float())
         weights = weights + boundaries * 10.0
         
@@ -94,6 +95,7 @@ class Mask2FormerModule(pl.LightningModule):
         target_flat = target_masks.float().flatten(1)
         weight_flat = boundary_weights.flatten(1)
         
+        # Standard weighted Dice formula
         intersection = (pred_flat * target_flat * weight_flat).sum(1)
         union = (pred_flat * weight_flat).sum(1) + (target_flat * weight_flat).sum(1)
         
