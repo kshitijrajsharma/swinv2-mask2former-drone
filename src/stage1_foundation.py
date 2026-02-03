@@ -1,3 +1,4 @@
+import numpy as np
 import pytorch_lightning as pl
 import torch
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
@@ -8,10 +9,11 @@ from torchmetrics import MetricCollection
 from torchmetrics.classification import (
     BinaryAccuracy,
     BinaryF1Score,
+    BinaryJaccardIndex,
     BinaryPrecision,
     BinaryRecall,
-    BinaryJaccardIndex,
 )
+from torchmetrics.detection import MeanAveragePrecision
 from transformers import Mask2FormerConfig, Mask2FormerForUniversalSegmentation
 
 from src.config import Config
@@ -51,12 +53,16 @@ class Mask2FormerModule(pl.LightningModule):
                 "p": BinaryPrecision(),
                 "r": BinaryRecall(),
                 "f1": BinaryF1Score(),
-                "iou": BinaryJaccardIndex(), # https://lightning.ai/docs/torchmetrics/stable/classification/jaccard_index.html
+                "iou": BinaryJaccardIndex(),
             }
         )
         self.train_metrics = metrics.clone(prefix="train_")
         self.val_metrics = metrics.clone(prefix="val_")
         self.test_metrics = metrics.clone(prefix="test_")
+        
+        self.train_map = MeanAveragePrecision(class_metrics=True)
+        self.val_map = MeanAveragePrecision(class_metrics=True)
+        self.test_map = MeanAveragePrecision(class_metrics=True)
 
     def forward(self, pixel_values, mask_labels=None, class_labels=None):
         return self.model(
@@ -69,15 +75,46 @@ class Mask2FormerModule(pl.LightningModule):
         results = self.image_processor.post_process_instance_segmentation(
             outputs, target_sizes=[target_size] * outputs.masks_queries_logits.shape[0]
         )
-        batch_masks = []
+        batch_binary_masks = []
+        batch_instance_data = []
+        
         for r in results:
-            mask = torch.zeros(target_size, device=self.device, dtype=torch.long)
+            binary_mask = torch.zeros(target_size, device=self.device, dtype=torch.long)
             seg_map = r["segmentation"].to(self.device)
+            
+            instance_masks = []
+            instance_boxes = []
+            instance_scores = []
+            instance_labels = []
+            
             for info in r["segments_info"]:
                 if info["label_id"] == 1:
-                    mask = mask | (seg_map == info["id"]).long()
-            batch_masks.append(mask)
-        return torch.stack(batch_masks)
+                    instance_mask = (seg_map == info["id"]).long()
+                    binary_mask = binary_mask | instance_mask
+                    
+                    instance_masks.append(instance_mask.cpu().bool())
+                    
+                    ys, xs = torch.where(instance_mask)
+                    if len(ys) > 0:
+                        x1, y1 = xs.min().item(), ys.min().item()
+                        x2, y2 = xs.max().item(), ys.max().item()
+                        instance_boxes.append([x1, y1, x2, y2])
+                    else:
+                        instance_boxes.append([0, 0, 1, 1])
+                    
+                    instance_scores.append(info["score"])
+                    instance_labels.append(1)
+            
+            batch_binary_masks.append(binary_mask)
+            
+            batch_instance_data.append({
+                "masks": torch.stack(instance_masks) if instance_masks else torch.zeros((0, *target_size), dtype=torch.bool),
+                "boxes": torch.tensor(instance_boxes, dtype=torch.float32),
+                "scores": torch.tensor(instance_scores, dtype=torch.float32),
+                "labels": torch.tensor(instance_labels, dtype=torch.long),
+            })
+        
+        return torch.stack(batch_binary_masks), batch_instance_data
 
     def training_step(self, batch, batch_idx):
         mask_labels = [m.to(self.device) for m in batch["mask_labels"]]
@@ -88,14 +125,22 @@ class Mask2FormerModule(pl.LightningModule):
 
         with torch.no_grad():
             target = torch.stack([(m.sum(0) > 0).long() for m in mask_labels])
-            preds = self._get_pred_masks(outputs, target.shape[-2:])
-            self.train_metrics.update(preds.flatten(), target.flatten())
+            binary_preds, instance_preds = self._get_pred_masks(outputs, target.shape[-2:])
+            self.train_metrics.update(binary_preds.flatten(), target.flatten())
+            
+            target_instances = self._prepare_target_instances(mask_labels, class_labels)
+            self.train_map.update(instance_preds, target_instances)
 
         return outputs.loss
 
     def on_train_epoch_end(self):
         self.log_dict(self.train_metrics.compute(), sync_dist=True)
         self.train_metrics.reset()
+        
+        map_results = self.train_map.compute()
+        self.log("train_map", map_results["map"], sync_dist=True)
+        self.log("train_map_50", map_results["map_50"], sync_dist=True)
+        self.train_map.reset()
 
     def validation_step(self, batch, batch_idx):
         mask_labels = [m.to(self.device) for m in batch["mask_labels"]]
@@ -104,14 +149,22 @@ class Mask2FormerModule(pl.LightningModule):
         self.log("val_loss", outputs.loss, prog_bar=False, sync_dist=True)
 
         target = torch.stack([(m.sum(0) > 0).long() for m in mask_labels])
-        preds = self._get_pred_masks(outputs, target.shape[-2:])
-        self.val_metrics.update(preds.flatten(), target.flatten())
+        binary_preds, instance_preds = self._get_pred_masks(outputs, target.shape[-2:])
+        self.val_metrics.update(binary_preds.flatten(), target.flatten())
+        
+        target_instances = self._prepare_target_instances(mask_labels, class_labels)
+        self.val_map.update(instance_preds, target_instances)
 
         return outputs.loss
 
     def on_validation_epoch_end(self):
         self.log_dict(self.val_metrics.compute(), prog_bar=True, sync_dist=True)
         self.val_metrics.reset()
+        
+        map_results = self.val_map.compute()
+        self.log("val_map", map_results["map"], prog_bar=True, sync_dist=True)
+        self.log("val_map_50", map_results["map_50"], prog_bar=True, sync_dist=True)
+        self.val_map.reset()
 
     def test_step(self, batch, batch_idx):
         mask_labels = [m.to(self.device) for m in batch["mask_labels"]]
@@ -120,15 +173,48 @@ class Mask2FormerModule(pl.LightningModule):
         self.log("test_loss", outputs.loss, prog_bar=True, sync_dist=True)
 
         target = torch.stack([(m.sum(0) > 0).long() for m in mask_labels])
-        preds = self._get_pred_masks(outputs, target.shape[-2:])
-        self.test_metrics.update(preds.flatten(), target.flatten())
+        binary_preds, instance_preds = self._get_pred_masks(outputs, target.shape[-2:])
+        self.test_metrics.update(binary_preds.flatten(), target.flatten())
+        
+        target_instances = self._prepare_target_instances(mask_labels, class_labels)
+        self.test_map.update(instance_preds, target_instances)
 
         return outputs.loss
 
     def on_test_epoch_end(self):
         self.log_dict(self.test_metrics.compute(), prog_bar=True, sync_dist=True)
         self.test_metrics.reset()
+        
+        map_results = self.test_map.compute()
+        self.log("test_map", map_results["map"], prog_bar=True, sync_dist=True)
+        self.log("test_map_50", map_results["map_50"], prog_bar=True, sync_dist=True)
+        self.test_map.reset()
 
+    def _prepare_target_instances(self, mask_labels, class_labels):
+        target_instances = []
+        for masks, labels in zip(mask_labels, class_labels):
+            instance_masks = []
+            instance_boxes = []
+            instance_labels = []
+            
+            for mask, label in zip(masks, labels):
+                if mask.sum() > 0:
+                    instance_masks.append(mask.cpu().bool())
+                    
+                    ys, xs = torch.where(mask)
+                    x1, y1 = xs.min().item(), ys.min().item()
+                    x2, y2 = xs.max().item(), ys.max().item()
+                    instance_boxes.append([x1, y1, x2, y2])
+                    instance_labels.append(label.item())
+            
+            target_instances.append({
+                "masks": torch.stack(instance_masks) if instance_masks else torch.zeros((0, *mask_labels[0].shape[-2:]), dtype=torch.bool),
+                "boxes": torch.tensor(instance_boxes, dtype=torch.float32),
+                "labels": torch.tensor(instance_labels, dtype=torch.long),
+            })
+        
+        return target_instances
+    
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
             self.parameters(),
@@ -149,7 +235,7 @@ class Mask2FormerModule(pl.LightningModule):
         }
 
     def visualize_batch(self, batch, num_samples=4, save_path=None):
-        """Visualize image, ground truth, and prediction side by side."""
+        """Visualize image, ground truth, and prediction with instance segmentation."""
         import matplotlib.pyplot as plt
 
         self.eval()
@@ -161,14 +247,14 @@ class Mask2FormerModule(pl.LightningModule):
             )
 
             target = torch.stack([(m.sum(0) > 0).long() for m in mask_labels])
-            preds = self._get_pred_masks(outputs, target.shape[-2:])
+            binary_preds, instance_preds = self._get_pred_masks(outputs, target.shape[-2:])
 
         images = batch["pixel_values"].cpu()
         target = target.cpu()
-        preds = preds.cpu()
+        binary_preds = binary_preds.cpu()
 
         num_samples = min(num_samples, len(images))
-        fig, axes = plt.subplots(num_samples, 3, figsize=(9, 3 * num_samples))
+        _, axes = plt.subplots(num_samples, 4, figsize=(12, 3 * num_samples))
         if num_samples == 1:
             axes = axes[None, :]
 
@@ -180,8 +266,12 @@ class Mask2FormerModule(pl.LightningModule):
             axes[i, 0].set_title("Image")
             axes[i, 1].imshow(target[i], cmap="gray", vmin=0, vmax=1)
             axes[i, 1].set_title("Ground Truth")
-            axes[i, 2].imshow(preds[i], cmap="gray", vmin=0, vmax=1)
-            axes[i, 2].set_title("Prediction")
+            axes[i, 2].imshow(binary_preds[i], cmap="gray", vmin=0, vmax=1)
+            axes[i, 2].set_title("Binary Prediction")
+            
+            instance_viz = self._create_instance_viz(instance_preds[i]["masks"], img.shape[:2])
+            axes[i, 3].imshow(instance_viz)
+            axes[i, 3].set_title(f"Instances ({len(instance_preds[i]['masks'])} bldgs)")
 
             for ax in axes[i]:
                 ax.axis("off")
@@ -191,6 +281,26 @@ class Mask2FormerModule(pl.LightningModule):
             plt.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.show()
         plt.close()
+    
+    def _create_instance_viz(self, instance_masks, target_size):
+        """Create colored visualization of instance masks."""
+        from matplotlib import cm
+        
+        viz = np.zeros((*target_size, 3), dtype=np.float32)
+        num_instances = len(instance_masks)
+        
+        if num_instances == 0:
+            return viz
+        
+        colors = cm.get_cmap('tab20')(np.linspace(0, 1, max(20, num_instances)))
+        
+        for idx, mask in enumerate(instance_masks):
+            mask_np = mask.cpu().numpy()
+            color = colors[idx % len(colors)][:3]
+            for c in range(3):
+                viz[:, :, c] = np.where(mask_np, color[c], viz[:, :, c])
+        
+        return viz
 
 
 class OAMDataModule(pl.LightningDataModule):
@@ -282,14 +392,14 @@ def main():
 
     callbacks = [
         EarlyStopping(
-            monitor="val_iou",
+            monitor="val_map_50",
             patience=cfg.early_stopping_patience,
             mode="max",
         ),
         ModelCheckpoint(
             dirpath=cfg.output_dir,
             filename="best",
-            monitor="val_iou",
+            monitor="val_map_50",
             mode="max",
             save_top_k=1,
         ),
