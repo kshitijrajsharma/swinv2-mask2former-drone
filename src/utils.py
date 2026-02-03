@@ -4,7 +4,6 @@ from typing import Any
 
 import numpy as np
 import torch
-from scipy import ndimage
 from torchgeo.datasets import RasterDataset, VectorDataset
 from transformers import Mask2FormerImageProcessor
 
@@ -21,12 +20,8 @@ class RAMPMaskDataset(VectorDataset):
 
     def __init__(self, paths, crs=None, **kwargs):
         super().__init__(
-            paths=paths, crs=crs, task="semantic_segmentation", **kwargs
-        )  # torchgeo has bug on instance_seg , it drops polygon from geojson if its in edge but the mask remains , this is where the bug is : `torchgeo/datasets/geo.py` (lines ~1070-1100) #TODO : raise this to torchgeo
-
-        # super().__init__(
-        #     paths=paths, crs=crs, task="instance_segmentation", **kwargs
-        # )  # torchgeo has bug on instance_seg , it drops polygon from geojson if its in edge but the mask remains , this is where the bug is : `torchgeo/datasets/geo.py` (lines ~1070-1100) #TODO : raise this to torchgeo
+            paths=paths, crs=crs, task="instance_segmentation", **kwargs
+        ) # needs fixes from https://github.com/kshitijrajsharma/torchgeo/blob/8ff64198f6bbf0355986b43981fc5a2bbc008846/torchgeo/datasets/geo.py
 
 
 def get_ramp_dataset(root: Path, regions: list[str]):
@@ -138,7 +133,6 @@ def make_collate_fn(image_processor: Mask2FormerImageProcessor):
                         torch.tensor(instance_classes, dtype=torch.long)
                     )
                 else:
-                    # no buildings
                     H, W = mask.shape[-2:]
                     mask_labels.append(torch.zeros((0, H, W), dtype=torch.float32))
                     class_labels.append(torch.tensor([], dtype=torch.long))
