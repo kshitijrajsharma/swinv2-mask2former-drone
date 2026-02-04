@@ -73,8 +73,9 @@ class Mask2FormerModule(pl.LightningModule):
             class_labels=class_labels,
         )
 
-    def _get_boundary_weights(self, masks, kernel_size=3):
+    def _get_boundary_weights(self, masks):
         """Extract boundary pixels and create weight map emphasizing edges."""
+        kernel_size = self.cfg.boundary_kernel_size
         if masks.dim() == 3:
             masks = masks.unsqueeze(1)
         # Edge detection: max_pool - avg_pool
@@ -82,9 +83,9 @@ class Mask2FormerModule(pl.LightningModule):
         boundaries = boundaries - F.avg_pool2d(masks.float(), kernel_size, stride=1, padding=kernel_size//2)
         boundaries = (boundaries.abs() > 0.1).float()
         
-        # Boundary pixels get 10x weight, interior pixels get 1x
+        # Boundary pixels get weight multiplier, interior pixels get 1x
         weights = torch.ones_like(masks.float())
-        weights = weights + boundaries * 10.0
+        weights = weights + boundaries * self.cfg.boundary_weight_multiplier
         
         return weights.squeeze(1) if weights.shape[1] == 1 else weights
 
@@ -155,10 +156,7 @@ class Mask2FormerModule(pl.LightningModule):
                     
                     binary_mask = binary_mask | instance_mask
                     instance_masks.append(instance_mask.cpu().bool())
-                    
-                    x1, y1 = xs.min().item(), ys.min().item()
-                    x2, y2 = xs.max().item(), ys.max().item()
-                    instance_boxes.append([x1, y1, x2, y2])
+                    instance_boxes.append(self._compute_bbox(instance_mask))
                     
                     instance_scores.append(info["score"])
                     instance_labels.append(1)
@@ -213,13 +211,7 @@ class Mask2FormerModule(pl.LightningModule):
         return total_loss
 
     def on_train_epoch_end(self):
-        self.log_dict(self.train_metrics.compute(), sync_dist=True)
-        self.train_metrics.reset()
-        
-        map_results = self.train_map.compute()
-        self.log("train_map", map_results["map"], sync_dist=True)
-        self.log("train_map_50", map_results["map_50"], sync_dist=True)
-        self.train_map.reset()
+        self._log_epoch_metrics("train", self.train_metrics, self.train_map)
 
     def _eval_step(self, batch, metrics, map_metric):
         mask_labels = [m.to(self.device) for m in batch["mask_labels"]]
@@ -244,13 +236,7 @@ class Mask2FormerModule(pl.LightningModule):
         return loss
 
     def on_validation_epoch_end(self):
-        self.log_dict(self.val_metrics.compute(), prog_bar=True, sync_dist=True)
-        self.val_metrics.reset()
-        
-        map_results = self.val_map.compute()
-        self.log("val_map", map_results["map"], prog_bar=True, sync_dist=True)
-        self.log("val_map_50", map_results["map_50"], prog_bar=True, sync_dist=True)
-        self.val_map.reset()
+        self._log_epoch_metrics("val", self.val_metrics, self.val_map, prog_bar=True)
 
     def test_step(self, batch, batch_idx):
         loss = self._eval_step(batch, self.test_metrics, self.test_map)
@@ -258,13 +244,17 @@ class Mask2FormerModule(pl.LightningModule):
         return loss
 
     def on_test_epoch_end(self):
-        self.log_dict(self.test_metrics.compute(), prog_bar=True, sync_dist=True)
-        self.test_metrics.reset()
+        self._log_epoch_metrics("test", self.test_metrics, self.test_map, prog_bar=True)
+    
+    def _log_epoch_metrics(self, prefix, metrics, map_metric, prog_bar=False):
+        """Helper to log metrics and mAP results at epoch end."""
+        self.log_dict(metrics.compute(), prog_bar=prog_bar, sync_dist=True)
+        metrics.reset()
         
-        map_results = self.test_map.compute()
-        self.log("test_map", map_results["map"], prog_bar=True, sync_dist=True)
-        self.log("test_map_50", map_results["map_50"], prog_bar=True, sync_dist=True)
-        self.test_map.reset()
+        map_results = map_metric.compute()
+        self.log(f"{prefix}_map", map_results["map"], prog_bar=prog_bar, sync_dist=True)
+        self.log(f"{prefix}_map_50", map_results["map_50"], prog_bar=prog_bar, sync_dist=True)
+        map_metric.reset()
 
     def _prepare_target_instances(self, mask_labels, class_labels):
         target_instances = []
@@ -276,11 +266,7 @@ class Mask2FormerModule(pl.LightningModule):
             for mask, label in zip(masks, labels):
                 if mask.sum() > 0:
                     instance_masks.append(mask.cpu().bool())
-                    
-                    ys, xs = torch.where(mask)
-                    x1, y1 = xs.min().item(), ys.min().item()
-                    x2, y2 = xs.max().item(), ys.max().item()
-                    instance_boxes.append([x1, y1, x2, y2])
+                    instance_boxes.append(self._compute_bbox(mask))
                     instance_labels.append(label.item())
             
             h, w = masks.shape[-2:]
@@ -292,6 +278,13 @@ class Mask2FormerModule(pl.LightningModule):
         
         return target_instances
     
+    def _compute_bbox(self, mask):
+        """Compute bounding box from mask."""
+        ys, xs = torch.where(mask)
+        x1, y1 = xs.min().item(), ys.min().item()
+        x2, y2 = xs.max().item(), ys.max().item()
+        return [x1, y1, x2, y2]
+    
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
             self.parameters(),
@@ -299,7 +292,7 @@ class Mask2FormerModule(pl.LightningModule):
             weight_decay=self.cfg.weight_decay,
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='max', factor=0.5, patience=5
+            optimizer, mode='max', factor=self.cfg.scheduler_factor, patience=self.cfg.scheduler_patience
         )
         return {
             "optimizer": optimizer,
@@ -384,9 +377,8 @@ class OAMDataModule(pl.LightningDataModule):
     def __init__(self, cfg: Config):
         super().__init__()
         self.cfg = cfg
-        self.image_size = 256
         self.image_processor = get_image_processor(
-            cfg.pretrained_model, self.image_size
+            cfg.pretrained_model, cfg.image_size
         )
         self.collate_fn = make_collate_fn(self.image_processor)
 
@@ -411,15 +403,16 @@ class OAMDataModule(pl.LightningDataModule):
         self.test_dataset = get_ramp_dataset(self.cfg.data_root, self.cfg.test_regions)
         print(f"Test dataset length: {len(self.test_dataset)}")
 
-    def train_dataloader(self):
+    def _create_dataloader(self, dataset, split_name):
+        """Helper to create dataloader with sampler."""
         sampler = RandomGeoSampler(
-            self.train_dataset,
-            size=256,
+            dataset,
+            size=self.cfg.sampler_size,
             units=Units.PIXELS,
         )
-        print("train_sampler length", len(sampler))
+        print(f"{split_name}_sampler length", len(sampler))
         return DataLoader(
-            self.train_dataset,
+            dataset,
             sampler=sampler,
             batch_size=self.cfg.batch_size,
             num_workers=self.cfg.num_workers,
@@ -427,42 +420,15 @@ class OAMDataModule(pl.LightningDataModule):
             pin_memory=True,
             drop_last=True,
         )
+
+    def train_dataloader(self):
+        return self._create_dataloader(self.train_dataset, "train")
 
     def val_dataloader(self):
-        sampler = RandomGeoSampler(
-            self.val_dataset,
-            size=256,
-            units=Units.PIXELS,
-        )
-        print("val_sampler length", len(sampler))
-
-        return DataLoader(
-            self.val_dataset,
-            sampler=sampler,
-            batch_size=self.cfg.batch_size,
-            num_workers=self.cfg.num_workers,
-            collate_fn=self.collate_fn,
-            pin_memory=True,
-            drop_last=True,
-        )
+        return self._create_dataloader(self.val_dataset, "val")
 
     def test_dataloader(self):
-        sampler = RandomGeoSampler(
-            self.test_dataset,
-            size=256,
-            units=Units.PIXELS,
-        )
-        print("test_sampler length", len(sampler))
-
-        return DataLoader(
-            self.test_dataset,
-            sampler=sampler,
-            batch_size=self.cfg.batch_size,
-            num_workers=self.cfg.num_workers,
-            collate_fn=self.collate_fn,
-            pin_memory=True,
-            drop_last=True,
-        )
+        return self._create_dataloader(self.test_dataset, "test")
 
 
 def main():

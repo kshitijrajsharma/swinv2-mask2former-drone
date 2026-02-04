@@ -38,3 +38,12 @@ class Config:
     wandb_run_name: str = "default_run"
 
     enable_data_augmentation: bool = False
+
+    image_size: int = 256
+    sampler_size: int = 256
+    
+    boundary_kernel_size: int = 3
+    boundary_weight_multiplier: float = 10.0
+    
+    scheduler_factor: float = 0.5
+    scheduler_patience: int = 5
