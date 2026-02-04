@@ -8,17 +8,6 @@ class Config:
     output_dir: Path = Path("outputs")
     seed: int = 64
 
-    # train_regions: list[str] = field(
-    #     default_factory=lambda: [
-    #         "ramp_dhaka_bangladesh",
-    #         "ramp_barishal_bangladesh",
-    #         "ramp_sylhet_bangladesh",
-    #     ]
-    # )
-    # val_regions: list[str] = field(
-    #     default_factory=lambda: ["ramp_coxs_bazar_bangladesh"]
-    # )
-
     train_regions: list[str] = field(default_factory=lambda: ["train"])
     val_regions: list[str] = field(default_factory=lambda: ["val"])
     test_regions: list[str] = field(default_factory=lambda: ["test"])
@@ -47,3 +36,5 @@ class Config:
     use_wandb: bool = True
     wandb_project: str = "building-seg-mask2former"
     wandb_run_name: str = "default_run"
+
+    enable_data_augmentation: bool = False

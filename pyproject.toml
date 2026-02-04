@@ -5,8 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "kornia>=0.8.2", # for the hausdorff distance loss
-    "marimo>=0.19.6",
+    "kornia>=0.8.2",
     "numpy>=2.4.1",
     "optuna>=4.7.0",
     "peft>=0.18.1", # this is for LORA

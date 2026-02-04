@@ -400,7 +400,9 @@ class OAMDataModule(pl.LightningDataModule):
             )
 
         self.train_dataset = get_ramp_dataset(self.cfg.data_root, train_regions)
-        self.train_dataset.transforms = get_augmentation()
+        if self.cfg.enable_data_augmentation:
+            print("Applying data augmentation to training dataset")
+            self.train_dataset.transforms = get_augmentation()
         print(f"Train dataset length: {len(self.train_dataset)}")
         
         self.val_dataset = get_ramp_dataset(self.cfg.data_root, val_regions)
