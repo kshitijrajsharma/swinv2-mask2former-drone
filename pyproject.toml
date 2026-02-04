@@ -1,18 +1,20 @@
 [project]
 name = "high-res-building-seg-swinv2-mask2former"
-version = "0.1.0"
+version = "0.0.1"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
+    "flytekit>=1.16.12",
     "kornia>=0.8.2",
     "numpy>=2.4.1",
     "optuna>=4.7.0",
-    "peft>=0.18.1", # this is for LORA
+    "peft>=0.18.1",
     "pycocotools>=2.0.11",
+    "pytorch-lightning>=2.6.0",
     "scipy>=1.17.0",
     "torch>=2.10.0",
-    "torchgeo>=0.8.0",
+    "torchgeo @ git+https://github.com/kshitijrajsharma/torchgeo.git",
     "torchvision>=0.25.0",
     "tqdm>=4.67.1",
     "transformers>=4.57.6",
