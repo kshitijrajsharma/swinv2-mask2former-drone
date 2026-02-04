@@ -16,7 +16,7 @@ image = ImageSpec(
 class DatasetConfig:
     drone_image_id: str = "62d86c65d8499800053796c4"
     zoom_level: int = 19
-    chip_size_px: int = 512
+    chip_size_px: int = 256
     train_bbox: list[float] = None
     val_bbox: list[float] = None
     test_bbox: list[float] = None
@@ -93,6 +93,11 @@ def train_model(
     wandb_project: str = "building-seg-mask2former",
     wandb_run_name: str = "flyte_run",
 ) -> FlyteDirectory:
+    import sys
+    from pathlib import Path
+    
+    sys.path.insert(0, str(Path(__file__).parent))
+    
     import pytorch_lightning as pl
     from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
     from pytorch_lightning.loggers import WandbLogger
@@ -116,7 +121,7 @@ def train_model(
     cfg.use_wandb = use_wandb
     cfg.wandb_project = wandb_project
     cfg.wandb_run_name = wandb_run_name
-    cfg.verbose = True
+    cfg.verbose = False
     
     set_seed(cfg.seed)
     
